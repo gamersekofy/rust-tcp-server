@@ -1,35 +1,81 @@
-use std::str;
-use super::method::Method;
+use super::method::{Method, MethodError};
 use std::convert::TryFrom;
-use std::io::Error;
-use std::fmt::{Display, Debug, Formatter};
+use std::fmt::{Debug, Display, Formatter};
+use std::str;
 use std::str::Utf8Error;
+use crate::http::query_string::QueryString;
 
-pub struct Request {
-    path: String,
-    query_string: Option<String>,
+#[derive(Debug)]
+pub struct Request<'buffer_lifetime> {
+    path: &'buffer_lifetime str,
+    query_string: Option<QueryString<'buffer_lifetime>>,
     method: Method,
 }
 
-impl Request {
+impl<'buffer_lifetime> Request<'buffer_lifetime> {
+    pub fn path(&self) -> &str {
+        self.path
+    }
 
+    pub fn query_string(&self) -> Option<&QueryString<'buffer_lifetime>> {
+        self.query_string.as_ref()
+    }
+
+    pub fn method(&self) -> &Method {
+        &self.method
+    }
 }
 
-impl TryFrom<&[u8]> for Request {
+impl<'buffer_lifetime> TryFrom<&'buffer_lifetime [u8]> for Request<'buffer_lifetime> {
     type Error = ParseError;
 
-    //GET /search?name=abc&sort=1 HTTP/1.1
-    fn try_from(buffer: &[u8]) -> Result<Self, Self::Error> {
-        match str::from_utf8(buffer){
-            Ok(request) => {}
-            Err(_) => return Err(ParseError::InvalidEncoding),
-        }
-        match str::from_utf8(buffer).or(Err(ParseError::InvalidEncoding)) {
-            Ok(request) => {}
-            Err(e) => return Err(e)
+    //GET /search?name=abc&sort=1 HTTP/1.1\r\n...HEADERS...
+    fn try_from(buffer: &'buffer_lifetime [u8]) -> Result<Request<'buffer_lifetime>, Self::Error> {
+        let request = str::from_utf8(buffer)?;
+
+        let (method, request) = get_next_word(request).ok_or(ParseError::InvalidRequest)?;
+        let (mut path, request) = get_next_word(request).ok_or(ParseError::InvalidRequest)?;
+        let (protocol, _) = get_next_word(request).ok_or(ParseError::InvalidRequest)?;
+
+        if protocol != "HTTP/1.1" {
+            return Err(ParseError::InvalidProtocol);
         }
 
-        let request = str::from_utf8(buffer).or(Err(ParseError::InvalidEncoding))?;
+        let method: Method = method.parse()?;
+
+        let mut query_string = None;
+
+        if let Some(i) = path.find('?') {
+            query_string = Some(QueryString::from(&path[i + 1..]));
+            path = &path[..i];
+        }
+
+        return Ok(Self {
+            path,
+            query_string,
+            method,
+        });
+    }
+}
+
+fn get_next_word(request: &str) -> Option<(&str, &str)> {
+    for (index, request_character) in request.chars().enumerate() {
+        if request_character == ' ' || request_character == '\r' {
+            return Some((&request[..index], &request[index + 1..]));
+        }
+    }
+    None
+}
+
+impl From<MethodError> for ParseError {
+    fn from(value: MethodError) -> Self {
+        self::ParseError::InvalidMethod
+    }
+}
+
+impl From<Utf8Error> for ParseError {
+    fn from(_: Utf8Error) -> Self {
+        Self::InvalidEncoding
     }
 }
 
@@ -49,20 +95,16 @@ pub enum ParseError {
     InvalidRequest,
     InvalidEncoding,
     InvalidProtocol,
-    InvalidMethod
+    InvalidMethod,
 }
 
-impl ParseError{
-    fn message(&self) -> &str{
+impl ParseError {
+    fn message(&self) -> &str {
         match self {
-            ParseError::InvalidRequest => {"Invalid Request"}
-            ParseError::InvalidEncoding => {"Invalid Encoding"}
-            ParseError::InvalidProtocol => {"Invalid Protocol"}
-            ParseError::InvalidMethod => {"Invalid Method"}
+            ParseError::InvalidRequest => "Invalid Request",
+            ParseError::InvalidEncoding => "Invalid Encoding",
+            ParseError::InvalidProtocol => "Invalid Protocol",
+            ParseError::InvalidMethod => "Invalid Method",
         }
     }
-}
-
-impl Error for ParseError {
-
 }
